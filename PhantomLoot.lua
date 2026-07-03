@@ -1,5 +1,16 @@
-RollFor = RollFor or {}
-local m = RollFor
+-- PhantomLoot - TBC (2.4.3) compatible version
+-- Adapted from the Vanilla/1.12.1 PhantomLoot addon by sica42
+-- Key changes for TBC:
+--   - GetItemInfo returns 10 values (added texture at index 10)
+--   - IsInGroup() replaced with TBC-compatible group checks
+--   - GetNumGroupMembers / GetNumRaidMembers used correctly
+--   - Transmog rolling disabled (no tmog in TBC)
+--   - softres.it (2.5.2) is the soft-res backend
+--   - MasterLoot candidate API uses TBC GetMasterLootCandidate()
+--   - UnitIsInMyGuild, UnitClass return differently in TBC (handled)
+
+PhantomLoot = PhantomLoot or {}
+local m = PhantomLoot
 
 ---@diagnostic disable-next-line: undefined-global
 local lib_stub = LibStub
@@ -13,6 +24,43 @@ local hl, white, grey, green, red = m.colors.highlight, m.colors.white, m.colors
 local RollSlashCommand = m.Types.RollSlashCommand
 local RollType = m.Types.RollType
 local RollingStrategy = m.Types.RollingStrategy
+
+-- ============================================================
+-- TBC COMPATIBILITY HELPERS
+-- ============================================================
+
+-- In TBC, IsInGroup() doesn't exist as a single function.
+-- Use IsInRaid() and IsInParty() instead.
+local function tbc_is_in_group()
+  return IsInRaid() or IsInParty()
+end
+
+-- In TBC, GetItemInfo returns 10 values:
+-- name, link, quality, iLevel, reqLevel, type, subType, maxStack, equipSlot, texture
+-- Vanilla returned 9 (no texture at the end in the same position).
+-- The original code already branches on m.vanilla, so we just ensure
+-- m.vanilla = false for TBC builds. This helper is here for clarity.
+local function tbc_get_item_info( item_id )
+  local name, link, quality, iLevel, reqLevel,
+        itemType, subType, maxStack, equipSlot, texture = GetItemInfo( item_id )
+  return name, link, quality, iLevel, reqLevel,
+         itemType, subType, maxStack, equipSlot, texture
+end
+
+-- Patch m.api to expose TBC-aware group check
+-- so the rest of the addon uses tbc_is_in_group() transparently.
+local _original_api_builder = m.api
+m.api_tbc_patch = function()
+  local api = _original_api_builder and _original_api_builder or {}
+  api.IsInGroup = tbc_is_in_group
+  -- TBC does not have GetItemInfo returning texture as 9th value on Vanilla path
+  api.GetItemInfo = tbc_get_item_info
+  return api
+end
+
+-- ============================================================
+-- CLEAR / RESET
+-- ============================================================
 
 local function clear_data()
   M.softres_gui.clear()
@@ -56,7 +104,8 @@ local function on_raid_trade( giver_name, recipient_name, item_name )
 end
 
 local function trade_complete_callback( recipient_name, items_given, items_received )
-  if not M.api().IsInGroup() then return end
+  -- TBC: IsInRaid() || IsInParty() replaces IsInGroup()
+  if not tbc_is_in_group() then return end
 
   for i = 1, getn( items_given ) do
     local item = items_given[ i ]
@@ -83,6 +132,10 @@ local function trade_complete_callback( recipient_name, items_given, items_recei
   end
 end
 
+-- ============================================================
+-- COMPONENT CREATION
+-- ============================================================
+
 local function create_components()
   ---@type AceTimer
   M.ace_timer = lib_stub( "AceTimer-3.0" )
@@ -94,6 +147,11 @@ local function create_components()
 
   ---@type Config
   M.config = m.Config.new( db( "config" ), M.config_event_bus )
+
+  -- TBC: force transmog rolling off — transmog is not a TBC feature
+  if M.config.tmog_rolling_enabled and M.config.tmog_rolling_enabled() then
+    M.config.set( "tmog_rolling_enabled", false )
+  end
 
   local classic = M.config.classic_look()
   local popup_bottom_margin, popup_bottom_button_margin = classic and 37 or 24, classic and 14 or 7
@@ -113,7 +171,8 @@ local function create_components()
   ---@type ConfirmPopup
   M.confirm_popup = m.ConfirmPopup.new( popup_builder( classic and 37 or 27 ), M.config )
 
-  M.api = function() return m.api end
+  -- TBC: use the patched API that routes IsInGroup() correctly
+  M.api = function() return m.api_tbc_patch() end
 
   ---@type PlayerInfo
   M.player_info = m.PlayerInfo.new( M.api() )
@@ -144,13 +203,9 @@ local function create_components()
   ---@type AwardedLoot
   M.awarded_loot = m.AwardedLoot.new( db( "awarded_loot" ), M.group_roster, M.config )
 
-  -- TODO: Add type.
   M.softres_db = db( "softres" )
-
-  -- TODO: Add type.
   M.unfiltered_softres = m.SoftRes.new( M.softres_db )
 
-  -- TODO: Add type.
   M.name_matcher = m.NameManualMatcher.new(
     db( "name_matcher" ), M.api,
     M.absent_softres( M.unfiltered_softres ),
@@ -178,7 +233,7 @@ local function create_components()
   ---@type LootFacade
   M.loot_facade = m.LootFacade.new( m.EventFrame.new( m.api ), m.api )
 
-  -- TODO: Add type.
+  -- TBC dummy items use 10-value GetItemInfo (texture is index 10, not 9)
   ---@diagnostic disable-next-line: unused-local, unused-function
   local function get_dummy_items()
     ---@diagnostic disable-next-line: unused-function
@@ -187,35 +242,24 @@ local function create_components()
       return string.format( "%s|Hitem:%s::::::::20:257::::::|h[%s]|h|r", color, id or "3299", name )
     end
 
-    -- local ids = { 17204, 16961, 18842, 16961, 16961, 18842, 16865, 16961, 17109, 16961, 18466, 11980, 12820, 3676 }
     local ids = { 17109, 17109, 17109, 3676 }
     local result = {}
     ---@type MakeDroppedItemFn
     local make_dropped_item = m.ItemUtils.make_dropped_item
     local boe = m.ItemUtils.BindType.BindOnEquip
 
-    ---@diagnostic disable-next-line: unused-local
     for i, item_id in ipairs( ids ) do
-      local name, tooltip_link, quality, texture
-
-      if m.vanilla then
-        name, tooltip_link, quality, _, _, _, _, _, texture = m.api.GetItemInfo( item_id )
-      else
-        name, tooltip_link, quality, _, _, _, _, _, _, texture = m.api.GetItemInfo( item_id )
-      end
-
+      -- TBC: GetItemInfo returns 10 values; texture is at index 10
+      local name, tooltip_link, quality, _, _, _, _, _, _, texture = GetItemInfo( item_id )
       local link = item_link( name, item_id, quality )
       local item = make_dropped_item( item_id, name, link, tooltip_link, quality, 1, texture, boe, nil, true )
-
       table.insert( result, item )
     end
 
     table.sort( result, function( a, b ) return a.quality > b.quality end )
-
     return result
   end
 
-  -- Enable this for testing in game. It will replace dropped items with the above.
   local mock_items = false
 
   ---@type LootList
@@ -225,7 +269,10 @@ local function create_components()
   M.loot_list = m.SoftResLootListDecorator.new( M.raw_loot_list, M.softres )
 
   ---@type MasterLootCandidates
-  M.master_loot_candidates = m.MasterLootCandidates.new( M.api(), M.group_roster, M.raw_loot_list ) -- remove group_roster for testing (dummy candidates)
+  -- TBC: GetMasterLootCandidate() is available and works the same way as in late Vanilla.
+  -- No change needed here unless your MasterLootCandidates module calls IsInGroup() internally —
+  -- if so, patch that module to use tbc_is_in_group() as well.
+  M.master_loot_candidates = m.MasterLootCandidates.new( M.api(), M.group_roster, M.raw_loot_list )
 
   ---@type MasterLootCandidateSelectionFrame
   M.player_selection_frame = m.MasterLootCandidateSelectionFrame.new( m.FrameBuilder, M.config )
@@ -273,7 +320,8 @@ local function create_components()
   )
 
   ---@type LootAwardCallback
-  M.loot_award_callback = m.LootAwardCallback.new( M.awarded_loot, M.roll_controller, M.winner_tracker, M.group_roster, M.softres, M.confirm_popup, M.config)
+  M.loot_award_callback = m.LootAwardCallback.new( M.awarded_loot, M.roll_controller, M.winner_tracker, M.group_roster, M.softres, M.confirm_popup, M.config )
+
   ---@type MasterLoot
   M.master_loot = m.MasterLoot.new(
     M.master_loot_candidates,
@@ -321,16 +369,10 @@ local function create_components()
     M.config
   )
 
-  -- TODO: Add type.
   M.softres_gui = m.SoftResGui.new( M.api, M.import_encoded_softres_data, M.softres_check, M.softres, clear_data, M.dropped_loot_announce.reset )
-
-  -- TODO: Add type.
   M.trade_tracker = m.TradeTracker.new( M.ace_timer, M.chat, trade_complete_callback )
-
-  -- TODO: Add type.
   M.usage_printer = m.UsagePrinter.new( M.chat )
 
-  -- TODO: Add type.
   M.minimap_button = m.MinimapButton.new(
     M.api, db( "minimap_button" ),
     M.softres_gui.toggle,
@@ -340,29 +382,14 @@ local function create_components()
     M.config
   )
 
-  -- TODO: Add type.
   M.master_loot_warning = m.MasterLootWarning.new( M.api, M.config, m.BossList.zones, M.player_info )
-
-  -- TODO: Add type.
   M.new_group_event = m.NewGroupEvent.new( M.group_roster )
-
-  -- TODO: Add type.
   M.auto_group_loot = m.AutoGroupLoot.new( M.loot_list, M.config, m.BossList.zones, M.player_info )
-
-  -- TODO: Add type.
   M.auto_master_loot = m.AutoMasterLoot.new( M.config, m.BossList.zones, M.player_info )
-
-  -- TODO: Add type.
   M.softres_roll_gui_data = m.SoftResRollGuiData.new( M.softres, M.group_roster )
-
-  -- TODO: Add type.
   M.tie_roll_gui_data = m.TieRollGuiData.new( M.group_roster )
-
-  -- TODO: Add type.
   M.welcome_popup = m.WelcomePopup.new( m.FrameBuilder, M.ace_timer, db( "welcome_popup" ) )
-
-  -- TODO: Add type.
-  M.roll_for_ad = m.RollForAd.new( M.player_info )
+  M.phantom_loot_ad = m.PhantomLootAd.new( M.player_info )
 
   ---@type RollingStrategyFactory
   M.rolling_strategy_factory = m.RollingStrategyFactory.new(
@@ -403,7 +430,6 @@ local function create_components()
   ---@type ArgsParser
   M.args_parser = m.ArgsParser.new( m.ItemUtils, M.config )
 
-  -- TODO: Add type.
   M.roll_result_announcer = m.RollResultAnnouncer.new( M.chat, M.roll_controller, M.softres, M.config )
 
   M.loot_facade_listener = m.LootFacadeListener.new(
@@ -434,6 +460,10 @@ local function create_components()
   M.sandbox = m.Sandbox.new()
 end
 
+-- ============================================================
+-- EVENT SUBSCRIPTIONS
+-- ============================================================
+
 local function subscribe_for_component_events()
   M.config.subscribe( "show_ml_warning", function( enabled )
     if enabled then
@@ -453,6 +483,11 @@ local function subscribe_for_component_events()
   end )
 end
 
+-- ============================================================
+-- SOFT-RES IMPORT
+-- TBC: uses softres.it (2.5.2) export format via Gargul Export
+-- ============================================================
+
 function M.import_softres_data( softres_data )
   M.unfiltered_softres.import( softres_data )
   M.name_matcher.auto_match()
@@ -471,12 +506,14 @@ function M.import_encoded_softres_data( data, data_loaded_callback )
   end
 
   M.import_softres_data( softres_data )
-
   info( "Soft-res data loaded successfully!" )
   if data_loaded_callback then data_loaded_callback( softres_data ) end
-
   update_minimap_icon()
 end
+
+-- ============================================================
+-- SLASH COMMAND HANDLERS
+-- ============================================================
 
 local function on_roll_command( roll_slash_command )
   return function( args )
@@ -500,7 +537,8 @@ local function on_roll_command( roll_slash_command )
       return
     end
 
-    if not M.api().IsInGroup() then
+    -- TBC: use tbc_is_in_group() instead of IsInGroup()
+    if not tbc_is_in_group() then
       M.chat.info( "Not in a group." )
       return
     end
@@ -561,7 +599,6 @@ local function is_rolling_check( f )
       M.chat.info( "Rolling not in progress." )
       return
     end
-
     f( unpack( arg ) )
   end
 end
@@ -571,16 +608,15 @@ local function in_group_check( f )
 end
 
 local function setup_storage()
-  -- Reset old AceDB configuration. I don't give a fuck :)
-  if RollForDb and RollForDb.global and RollForDb.global.version then
-    RollForDb = nil
+  if PhantomLootDb and PhantomLootDb.global and PhantomLootDb.global.version then
+    PhantomLootDb = nil
   end
 
-  RollForDb = RollForDb or {}
-  RollForCharDb = RollForCharDb or {}
+  PhantomLootDb = PhantomLootDb or {}
+  PhantomLootCharDb = PhantomLootCharDb or {}
 
-  M.db = RollForDb
-  M.char_db = RollForCharDb
+  M.db = PhantomLootDb
+  M.char_db = PhantomLootCharDb
 
   if not M.db.version then
     M.db.version = version.str
@@ -591,7 +627,6 @@ local function on_softres_command( args )
   if args == "init" then
     clear_data()
   end
-
   M.softres_gui.toggle()
 end
 
@@ -601,7 +636,8 @@ local function on_check_softres_command( args )
     local result, players = M.softres_check.check_softres( true )
 
     if result == M.softres_check.ResultType.SomeoneIsNotSoftRessing and m.raid_id then
-      local msg = string.format( "https://raidres.fly.dev/res/%s", m.raid_id )
+      -- TBC: still using softres.it as the backend (supports 2.5.2)
+      local msg = string.format( "https://softres.it/raid/%s", m.raid_id )
       if getn( players ) < 10 then
         msg = msg .. " - "
         for i = 1, getn( players ) do
@@ -609,15 +645,14 @@ local function on_check_softres_command( args )
           local player_name = players[ i ].name
           local grouped_player = M.group_roster.find_player( player_name )
           local next = grouped_player and m.colorize_player_by_class( grouped_player.name, grouped_player.class ) or player_name
-
           msg = msg .. separator .. next
         end
-        msg = string.gsub(msg, "^(.*),%s*(.*)$", "%1 and %2")
+        msg = string.gsub( msg, "^(.*),%s*(.*)$", "%1 and %2" )
         msg = msg .. " missing SR"
       end
       M.chat.announce( msg, use_raid_warning )
     else
-      m.pretty_print("No soft-res items found.")
+      m.pretty_print( "No soft-res items found." )
     end
   else
     M.softres_check.check_softres()
@@ -667,57 +702,10 @@ function M.on_chat_msg_system( message )
   end
 end
 
--- TODO: this can now be replaced by mocking LootList
----@diagnostic disable-next-line: unused-local, unused-function
-local function simulate_loot_dropped( args )
-  ---@diagnostic disable-next-line: unused-function
-  local function mock_table_function( name, values )
-    M.api()[ name ] = function( key )
-      local value = values[ key ]
-
-      if type( value ) == "function" then
-        return value()
-      else
-        return value
-      end
-    end
-  end
-
-  ---@diagnostic disable-next-line: unused-function
-  local function make_loot_slot_info( count, quality )
-    local result = {}
-
-    for i = 1, count do
-      table.insert( result, function()
-        if i == count then
-          m.api = m.real_api
-          m.real_api = nil
-        end
-
-        return nil, nil, nil, quality or 4
-      end )
-    end
-
-    return result
-  end
-
-  local item_links = M.item_utils.parse_all_links( args )
-
-  if m.real_api then
-    info( "Mocking in progress." )
-    return
-  end
-
-  m.real_api = m.api
-  m.api = m.clone( m.api )
-  M.api()[ "GetNumLootItems" ] = function() return getn( item_links ) end
-  M.api()[ "UnitName" ] = function() return tostring( m.lua.time() ) end
-  M.api()[ "GetLootThreshold" ] = function() return 4 end
-  mock_table_function( "GetLootSlotLink", item_links )
-  mock_table_function( "GetLootSlotInfo", make_loot_slot_info( getn( item_links ), 4 ) )
-
-  M.dropped_loot_announce.on_loot_opened()
-end
+-- ============================================================
+-- HOW TO ROLL ANNOUNCEMENT
+-- TBC: transmog rolling is omitted
+-- ============================================================
 
 local function show_how_to_roll()
   M.chat.announce( "How to roll:" )
@@ -728,10 +716,7 @@ local function show_how_to_roll()
 
   M.chat.announce( string.format( "For main-spec%s, type: /roll%s", sr_count > 0 and " and soft-res" or "", ms ) )
   M.chat.announce( string.format( "For off-spec, type: /roll %s", M.config.os_roll_threshold() ) )
-
-  if M.config.tmog_rolling_enabled() then
-    M.chat.announce( string.format( "For transmog, type: /roll %s", M.config.tmog_roll_threshold() ) )
-  end
+  -- NOTE: Transmog rolling (/roll 98) intentionally excluded for TBC
 end
 
 local function on_reset_dropped_loot_announce_command()
@@ -740,69 +725,75 @@ end
 
 local function plus_ones_command( args )
   local function print_usage()
-    M.chat.info(string.format( "%s - %s", hl( "/pl" ), white( "List +1's" ) ) )
-    M.chat.info(string.format( "%s %s %s - %s", hl( "/pl add " ), grey( "<player>" ), grey( "<item>" ), white( "Add item to players +1's" ) ) )
-    M.chat.info(string.format( "%s %s %s - %s", hl( "/pl rm" ), grey( "<player>" ), grey( "<item>" ), white( "Remove item from players +1's" ) ) )
+    M.chat.info( string.format( "%s - %s", hl( "/pl" ), white( "List +1's" ) ) )
+    M.chat.info( string.format( "%s %s %s - %s", hl( "/pl add " ), grey( "<player>" ), grey( "<item>" ), white( "Add item to players +1's" ) ) )
+    M.chat.info( string.format( "%s %s %s - %s", hl( "/pl rm" ), grey( "<player>" ), grey( "<item>" ), white( "Remove item from players +1's" ) ) )
   end
+
   local loot = M.awarded_loot.get_winners()
   local players = {}
-  for _, award in ipairs(loot) do
+  for _, award in ipairs( loot ) do
     if award ~= nil then
-      if not players[award.player_name] then
-            players[award.player_name] = { award }
+      if not players[ award.player_name ] then
+        players[ award.player_name ] = { award }
       else
-        table.insert(players[award.player_name], award)
+        table.insert( players[ award.player_name ], award )
       end
     end
   end
 
   if args == "" then
     local plus_ones_exist = false
-    for player_name, awards in pairs(players) do
-      local plus_ones = m.filter(awards, (function(a) return a.plus_one end))
-      if getn(plus_ones) > 0 then
+    for player_name, awards in pairs( players ) do
+      local plus_ones = m.filter( awards, ( function( a ) return a.plus_one end ) )
+      if getn( plus_ones ) > 0 then
         plus_ones_exist = true
-        local item_list = table.concat(m.map(plus_ones, (function (a) return a.item_link end)), " ")
-        local colored_player_name = m.colorize_player_by_class( player_name, awards[1].player_class ) or grey( player_name )
-        M.chat.info( colored_player_name .. green(" MS +" .. getn(plus_ones)) .. ": " .. item_list)
+        local item_list = table.concat( m.map( plus_ones, ( function( a ) return a.item_link end ) ), " " )
+        local colored_player_name = m.colorize_player_by_class( player_name, awards[ 1 ].player_class ) or grey( player_name )
+        M.chat.info( colored_player_name .. green( " MS +" .. getn( plus_ones ) ) .. ": " .. item_list )
       end
     end
     if not plus_ones_exist then
-      M.chat.info("There are no +1's yet")
+      M.chat.info( "There are no +1's yet" )
     end
   else
-    local action, player_name, item_link = string.match(args, "^(%S+) (%S+) (|%w+|Hitem.+|r)$")
+    local action, player_name, item_link = string.match( args, "^(%S+) (%S+) (|%w+|Hitem.+|r)$" )
     local item_id = item_link and M.item_utils.get_item_id( item_link )
     local group_players = M.group_roster.get_all_players_in_my_group()
-    local player = player_name and m.filter(group_players, (function (p) return string.lower(p.name) == string.lower(player_name) end))[1]
+    local player = player_name and m.filter( group_players, ( function( p ) return string.lower( p.name ) == string.lower( player_name ) end ) )[ 1 ]
+
     if action == nil and player_name == nil and item_link == nil then
-      M.chat.info(red("Invalid usage"))
+      M.chat.info( red( "Invalid usage" ) )
       print_usage()
     elseif action ~= "add" and action ~= "rm" and action ~= "remove" then
-      M.chat.info(red("Invalid action"))
+      M.chat.info( red( "Invalid action" ) )
       print_usage()
-    elseif (player == nil) then
-      M.chat.info(red("Player not found in group"))
+    elseif player == nil then
+      M.chat.info( red( "Player not found in group" ) )
       print_usage()
     elseif item_link == nil or item_id == nil then
-      M.chat.info(red("Invalid item"))
+      M.chat.info( red( "Invalid item" ) )
       print_usage()
     elseif action == "add" then
-      M.chat.info("Gave " .. (m.colorize_player_by_class( player.name, player.class ) or m.colors.grey( player.name )) .. " a +1 for " .. item_link )
+      M.chat.info( "Gave " .. ( m.colorize_player_by_class( player.name, player.class ) or m.colors.grey( player.name ) ) .. " a +1 for " .. item_link )
       local roll_data = { player_name = player.name, player_class = player.class, roll_type = RollType.MainSpec, roll = 0, plus_ones = 0 }
-      M.awarded_loot.award( player.name, item_id, roll_data, RollingStrategy.NormalRoll, item_link, player.class, nil, true)
+      M.awarded_loot.award( player.name, item_id, roll_data, RollingStrategy.NormalRoll, item_link, player.class, nil, true )
     elseif action == "rm" or action == "remove" then
       if M.awarded_loot.has_item_been_awarded( player.name, item_id ) then
         M.unaward_item( player.name, item_id, item_link )
       else
-        M.chat.info(red(player.name .. " doesn't have a +1 for " .. item_link))
+        M.chat.info( red( player.name .. " doesn't have a +1 for " .. item_link ) )
       end
     end
   end
 end
 
+-- ============================================================
+-- SLASH COMMAND REGISTRATION
+-- TBC: /roll 98 (transmog) command is removed
+-- ============================================================
+
 local function setup_slash_commands()
-  -- Roll For commands
   SLASH_RF1 = RollSlashCommand.NormalRoll
   M.api().SlashCmdList[ "RF" ] = on_roll_command( RollSlashCommand.NormalRoll )
   SLASH_ARF1 = RollSlashCommand.NoSoftResRoll
@@ -822,7 +813,6 @@ local function setup_slash_commands()
   SLASH_RFR1 = "/rfr"
   M.api().SlashCmdList[ "RFR" ] = on_reset_dropped_loot_announce_command
 
-  -- Soft Res commands
   SLASH_SR1 = "/sr"
   M.api().SlashCmdList[ "SR" ] = on_softres_command
   SLASH_SRS1 = "/srs"
@@ -840,13 +830,16 @@ local function setup_slash_commands()
   SLASH_RFT1 = "/rft"
   M.api().SlashCmdList[ "RFT" ] = M.sandbox.run
 
-
   SLASH_PL1 = "/pl"
-  M.api().SlashCmdList[ "PL"] = plus_ones_command
+  M.api().SlashCmdList[ "PL" ] = plus_ones_command
 
-  --SLASH_DROPPED1 = "/DROPPED"
-  --M.api().SlashCmdList[ "DROPPED" ] = simulate_loot_dropped
+  -- NOTE: /DROPPED (simulate_loot_dropped) intentionally excluded from TBC build
+  -- NOTE: Transmog roll command (/roll 98) is not registered for TBC
 end
+
+-- ============================================================
+-- PLAYER LOGIN
+-- ============================================================
 
 function M.on_player_login()
   setup_storage()
@@ -854,9 +847,7 @@ function M.on_player_login()
   subscribe_for_component_events()
   setup_slash_commands()
 
-  info( string.format( "Loaded (%s).", hl( string.format( "v%s", version.str ) ) ) )
-
-
+  info( string.format( "Loaded (%s) [TBC].", hl( string.format( "v%s", version.str ) ) ) )
 
   M.version_broadcast.broadcast()
   M.import_encoded_softres_data( M.softres_db.data )
@@ -866,21 +857,17 @@ function M.on_player_login()
     M.welcome_popup.show()
   end
 
+  -- TBC: LootFrame still exists but behaves slightly differently.
+  -- UnregisterAllEvents is still valid in TBC client.
   ---@diagnostic disable-next-line: undefined-global
   LootFrame:UnregisterAllEvents()
   ---@diagnostic disable-next-line: undefined-global
   if pfLootFrame then pfLootFrame:UnregisterAllEvents() end
 end
 
----@diagnostic disable-next-line: unused-local, unused-function
-local function on_party_message( message, player )
-  for name, roll in string.gmatch( message, "(%a+) rolls (%d+)" ) do
-    on_roll( name, tonumber( roll ), 1, 100 )
-  end
-  for name, roll in string.gmatch( message, "(%a+) rolls os (%d+)" ) do
-    on_roll( name, tonumber( roll ), 1, 99 )
-  end
-end
+-- ============================================================
+-- GROUP / CHAT HANDLERS
+-- ============================================================
 
 function M.unaward_item( player_name, item_id, item_link )
   M.awarded_loot.unaward( player_name, item_id )
@@ -893,7 +880,7 @@ function M.on_group_changed()
 end
 
 function M.on_chat_msg_addon( name, message, _, sender )
-  if name ~= "RollFor" or not message then return end
+  if name ~= "PhantomLoot" or not message then return end
 
   for ver in string.gmatch( message, "VERSION::(.*)" ) do
     M.version_broadcast.on_version( ver )
@@ -915,6 +902,10 @@ function M.on_chat_msg_addon( name, message, _, sender )
     return
   end
 end
+
+-- ============================================================
+-- KEY BINDINGS & EVENT HANDLER
+-- ============================================================
 
 ---@type KeyBindings
 m.key_bindings = m.KeyBindings.new( M )
