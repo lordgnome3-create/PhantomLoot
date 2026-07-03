@@ -1,0 +1,164 @@
+# PhantomLoot
+
+A TBC (2.4.3) loot management addon for World of Warcraft: The Burning Crusade. PhantomLoot automates item rolling and soft reservation in raid environments, integrating with [softres.it](https://softres.it) for soft-res list management.
+
+Originally based on [RollFor](https://github.com/sica42/RollFor) by Obszczymucha.
+
+---
+
+## Features
+
+- **Automated rolling** — starts and manages rolls in chat, detects results, resolves ties automatically
+- **Soft reservation integration** — imports SR data from softres.it; minimap icon shows at a glance who hasn't soft-ressed
+- **Master loot support** — enhanced master loot window with candidates sorted by class, confirmation dialogs, and automated loot method detection
+- **Raid roll** — randomizes loot among eligible players (`/rr`)
+- **Insta raid roll** — instant no-countdown raid roll (`/irr`)
+- **Winner tracking** — tracks all loot awarded in a session with a popup history view
+- **Trade tracking** — monitors trades after loot is awarded and updates records accordingly
+- **+1 system** — track bonus rolls awarded to players (`/pl`)
+- **Auto loot** — configurable automatic looting behavior
+- **Version broadcast** — checks which raiders are running PhantomLoot and which version
+
+---
+
+## Requirements
+
+- World of Warcraft: The Burning Crusade (interface version 20400 / patch 2.4.3)
+- [softres.it](https://softres.it) account for soft reservation lists (free)
+
+---
+
+## Installation
+
+1. Download or clone this repository
+2. Rename the folder to `PhantomLoot` if it isn't already
+3. Place the `PhantomLoot` folder in your addons directory:
+   ```
+   World of Warcraft\_tbc_\Interface\AddOns\PhantomLoot\
+   ```
+4. Launch the game and enable PhantomLoot in the AddOns menu on the character select screen
+
+---
+
+## Soft Reservation Setup
+
+PhantomLoot uses [softres.it](https://softres.it) as its soft-res backend.
+
+1. Create a raid at softres.it and share the link with your raiders
+2. Once everyone has reserved, lock the raid and click **Gargul Export**
+3. Copy the exported string
+4. In-game, open the SR import window (`/sr` or click the minimap button) and paste the string
+5. PhantomLoot will auto-match player names and update the minimap icon
+
+**Minimap icon colors:**
+- 🟢 Green — everyone in the raid has soft-ressed
+- 🟠 Orange — some players have not soft-ressed
+- 🔴 Red — soft-res data is outdated
+- ⚪ White — no soft-res data loaded
+
+---
+
+## Slash Commands
+
+### Rolling
+| Command | Description |
+|---|---|
+| `/rf [item] [count] [seconds]` | Start a normal roll (respects soft-res) |
+| `/arf [item] [count] [seconds]` | Start a roll ignoring soft-res (all roll) |
+| `/rr [item]` | Raid roll — random winner among eligible players |
+| `/irr [item]` | Insta raid roll — instant, no countdown |
+| `/cr` | Cancel rolling in progress |
+| `/fr` | Finish rolling early |
+| `/ssr [limit]` | Show sorted rolls (default: top 5) |
+| `/rfr` | Reset dropped loot announce |
+| `/htr` | Announce how-to-roll instructions to the group |
+
+### Soft Reservation
+| Command | Description |
+|---|---|
+| `/sr` | Open / close the soft-res import window |
+| `/sr init` | Clear all soft-res data and reset |
+| `/srs` | Show current soft-res list |
+| `/src` | Check who hasn't soft-ressed |
+| `/src a` | Announce missing soft-ressers in chat |
+| `/src aw` | Announce missing soft-ressers as a raid warning |
+| `/sro` | Manually match player names |
+
+### Windows & Misc
+| Command | Description |
+|---|---|
+| `/rfw` | Open winner tracking popup |
+| `/rfo` | Open options popup |
+| `/pl` | List current +1's |
+| `/pl add [player] [item]` | Add a +1 for a player |
+| `/pl rm [player] [item]` | Remove a +1 from a player |
+| `/rf versioncheck` | Check addon versions across the group |
+| `/rf versioncheck guild` | Check addon versions across the guild |
+
+---
+
+## Key Bindings
+
+PhantomLoot registers three bindable actions in the **Key Bindings** menu under the **PhantomLoot** header:
+
+- Toggle options window
+- Toggle SR import window
+- Toggle winners window
+
+---
+
+## How Rolling Works
+
+When you start a roll with `/rf [item]`, PhantomLoot:
+
+1. Announces the item and roll window to the group
+2. Watches chat for `/roll` results from eligible players
+3. If the item is soft-ressed, only players who reserved it are eligible for the SR roll; others can roll offspec
+4. Automatically detects ties and prompts a re-roll
+5. Announces the winner and records the award
+
+**Roll thresholds (default):**
+- Main spec: `/roll` (1–100)
+- Off spec: `/roll 99` (1–99)
+
+---
+
+## Saved Variables
+
+PhantomLoot stores data in two places:
+
+- `PhantomLootDb` — account-wide (awarded loot history, config, minimap position)
+- `PhantomLootCharDb` — per-character (soft-res data, name matcher overrides)
+
+These are saved in `WTF\Account\...\SavedVariables\` automatically.
+
+---
+
+## File Structure
+
+```
+PhantomLoot\
+  PhantomLoot.toc
+  PhantomLoot_Bindings.xml
+  main.lua
+  libs\
+    tbc\
+      LibStub\
+      CallbackHandler-1.0\
+      AceCore-3.0\
+      AceTimer-3.0\
+      Libs.xml
+  src\
+    tbc\
+      compat.lua
+    (all other source modules)
+  assets\
+```
+
+---
+
+## Credits
+
+- **Obszczymucha** — original RollFor addon author
+- **Itamedruids** — raidres.fly.dev and export function
+- PhantomLoot is a TBC port and rename of RollFor, adapted for patch 2.4.3 and softres.it
